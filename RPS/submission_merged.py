@@ -46,7 +46,7 @@ with __stickytape_temporary_dir() as __stickytape_working_dir:
     __stickytape_write_module('markov.py', "\nimport numpy as np\nimport collections\n\ndef markov_agent(observation, configuration):\n    k = 2\n    global table, action_seq\n    if observation.step % 250 == 0: # refresh table every 250 steps\n        action_seq, table = [], collections.defaultdict(lambda: [1, 1, 1])    \n    if len(action_seq) <= 2 * k + 1:\n        action = int(np.random.randint(3))\n        if observation.step > 0:\n            action_seq.extend([observation.lastOpponentAction, action])\n        else:\n            action_seq.append(action)\n        return action\n    # update table\n    key = ''.join([str(a) for a in action_seq[:-1]])\n    table[key][observation.lastOpponentAction] += 1\n    # update action seq\n    action_seq[:-2] = action_seq[2:]\n    action_seq[-2] = observation.lastOpponentAction\n    # predict opponent next move\n    key = ''.join([str(a) for a in action_seq[:-1]])\n    if observation.step < 500:\n        next_opponent_action_pred = np.argmax(table[key])\n    else:\n        scores = np.array(table[key])\n        next_opponent_action_pred = np.random.choice(3, p=scores/scores.sum()) # add stochasticity for second part of the game\n    # make an action\n    action = (next_opponent_action_pred + 1) % 3\n    # if high probability to lose -> let's surprise our opponent with sudden change of our strategy\n    if observation.step > 900:\n        action = next_opponent_action_pred\n    action_seq[-1] = action\n    return int(action)\n")
     __stickytape_write_module('tree.py', "\nimport numpy as np\nimport collections\nfrom sklearn.tree import DecisionTreeClassifier\n\ndef construct_local_features(rollouts):\n    features = np.array([[step % k for step in rollouts['steps']] for k in (2, 3, 5)])\n    features = np.append(features, rollouts['steps'])\n    features = np.append(features, rollouts['actions'])\n    features = np.append(features, rollouts['opp-actions'])\n    return features\n\ndef construct_global_features(rollouts):\n    features = []\n    for key in ['actions', 'opp-actions']:\n        for i in range(3):\n            actions_count = np.mean([r == i for r in rollouts[key]])\n            features.append(actions_count)\n    \n    return np.array(features)\n\ndef construct_features(short_stat_rollouts, long_stat_rollouts):\n    lf = construct_local_features(short_stat_rollouts)\n    gf = construct_global_features(long_stat_rollouts)\n    features = np.concatenate([lf, gf])\n    return features\n\ndef predict_opponent_move(train_data, test_sample):\n    classifier = DecisionTreeClassifier(random_state=42)\n    classifier.fit(train_data['x'], train_data['y'])\n    return classifier.predict(test_sample)\n\ndef update_rollouts_hist(rollouts_hist, last_move, opp_last_action):\n    rollouts_hist['steps'].append(last_move['step'])\n    rollouts_hist['actions'].append(last_move['action'])\n    rollouts_hist['opp-actions'].append(opp_last_action)\n    return rollouts_hist\n\ndef warmup_strategy(observation, configuration):\n    global rollouts_hist, last_move\n    action = int(np.random.randint(3))\n    if observation.step == 0:\n        last_move = {'step': 0, 'action': action}\n        rollouts_hist = {'steps': [], 'actions': [], 'opp-actions': []}\n    else:\n        rollouts_hist = update_rollouts_hist(rollouts_hist, last_move, observation.lastOpponentAction)\n        last_move = {'step': observation.step, 'action': action}\n    return int(action)\n\ndef init_training_data(rollouts_hist, k):\n    for i in range(len(rollouts_hist['steps']) - k + 1):\n        short_stat_rollouts = {key: rollouts_hist[key][i:i+k] for key in rollouts_hist}\n        long_stat_rollouts = {key: rollouts_hist[key][:i+k] for key in rollouts_hist}\n        features = construct_features(short_stat_rollouts, long_stat_rollouts)        \n        data['x'].append(features)\n    test_sample = data['x'][-1].reshape(1, -1)\n    data['x'] = data['x'][:-1]\n    data['y'] = rollouts_hist['opp-actions'][k:]\n    return data, test_sample\n\ndef agent(observation, configuration):\n    # hyperparameters\n    k = 5\n    min_samples = 25\n    global rollouts_hist, last_move, data, test_sample\n    if observation.step == 0:\n        data = {'x': [], 'y': []}\n    # if not enough data -> randomize\n    if observation.step <= min_samples + k:\n        return warmup_strategy(observation, configuration)\n    # update statistics\n    rollouts_hist = update_rollouts_hist(rollouts_hist, last_move, observation.lastOpponentAction)\n    # update training data\n    if len(data['x']) == 0:\n        data, test_sample = init_training_data(rollouts_hist, k)\n    else:        \n        short_stat_rollouts = {key: rollouts_hist[key][-k:] for key in rollouts_hist}\n        features = construct_features(short_stat_rollouts, rollouts_hist)\n        data['x'].append(test_sample[0])\n        data['y'] = rollouts_hist['opp-actions'][k:]\n        test_sample = features.reshape(1, -1)\n        \n    # predict opponents move and choose an action\n    next_opp_action_pred = predict_opponent_move(data, test_sample)\n    action = int((next_opp_action_pred + 1) % 3)\n    last_move = {'step': observation.step, 'action': action}\n    return action\n")
     __stickytape_write_module('rfind.py', '\nimport random\nhist = []  # history of your moves\ndict_last = {}\nmax_dict_key = 10\nlast_move = 0\n\n\ndef beat(x):\n    return (x + 1) % 3\n\n\ndef predict():\n    global dict_last\n    global max_dict_key\n    for i in reversed(range(min(len(hist), max_dict_key))):\n        t = tuple(hist[-i:])\n        if t in dict_last:\n            return dict_last[t]\n    return random.choice([0, 1, 2])\n\n\ndef update(move, op_move):\n    global hist\n    global dict_last\n    global max_dict_key\n    hist.append(move)\n    for i in reversed(range(min(len(hist), max_dict_key))):\n        t = tuple(hist[-i:])\n        dict_last[t] = op_move\n\n\ndef run(observation, configuration):\n    global last_move\n    if observation.step == 0:\n        last_move = random.choice([0, 1, 2])\n        return last_move\n    update(last_move, observation.lastOpponentAction)\n    move = beat(predict())\n\n    return move\n')
-    __stickytape_write_module('statpred.py', '\nimport random\nimport pydash\nfrom collections import Counter\n\n# Create a small amount of starting history\nhistory = {\n    "guess":      [0,1,2],\n    "prediction": [0,1,2],\n    "expected":   [0,1,2],\n    "action":     [0,1,2],\n    "opponent":   [0,1],\n}\ndef statistical_prediction_agent(observation, configuration):    \n    global history\n    actions         = list(range(configuration.signs))  # [0,1,2]\n    last_action     = history[\'action\'][-1]\n    opponent_action = observation.lastOpponentAction if observation.step > 0 else 2\n    \n    history[\'opponent\'].append(opponent_action)\n\n    # Make weighted random guess based on the complete move history, weighted towards relative moves based on our last action \n    move_frequency       = Counter(history[\'opponent\'])\n    response_frequency   = Counter(zip(history[\'action\'], history[\'opponent\'])) \n    move_weights         = [ move_frequency.get(n,1) + response_frequency.get((last_action,n),1) for n in range(configuration.signs) ] \n    guess                = random.choices( population=actions, weights=move_weights, k=1 )[0]\n    \n    # Compare our guess to how our opponent actually played\n    guess_frequency      = Counter(zip(history[\'guess\'], history[\'opponent\']))\n    guess_weights        = [ guess_frequency.get((guess,n),1) for n in range(configuration.signs) ]\n    prediction           = random.choices( population=actions, weights=guess_weights, k=1 )[0]\n\n    # Repeat, but based on how many times our prediction was correct\n    prediction_frequency = Counter(zip(history[\'prediction\'], history[\'opponent\']))\n    prediction_weights   = [ prediction_frequency.get((prediction,n),1) for n in range(configuration.signs) ]\n    expected             = random.choices( population=actions, weights=prediction_weights, k=1 )[0]\n\n    # Play the +1 counter move\n    action = (expected + 1) % configuration.signs\n    \n    # Persist state\n    history[\'guess\'].append(guess)\n    history[\'prediction\'].append(prediction)\n    history[\'expected\'].append(expected)\n    history[\'action\'].append(action)\n\n    # Print debug information\n    print(\'opponent_action                = \', opponent_action)\n    print(\'move_weights,       guess      = \', move_weights, guess)\n    print(\'guess_weights,      prediction = \', guess_weights, prediction)\n    print(\'prediction_weights, expected   = \', prediction_weights, expected)\n    print(\'action                         = \', action)\n    print()\n    \n    return action\n')
+    __stickytape_write_module('statpred.py', '\nimport random\nimport pydash\nfrom collections import Counter\n\n# Create a small amount of starting history\nhistory = {\n    "guess":      [0,1,2],\n    "prediction": [0,1,2],\n    "expected":   [0,1,2],\n    "action":     [0,1,2],\n    "opponent":   [0,1],\n}\ndef statistical_prediction_agent(observation, configuration):    \n    global history\n    actions         = list(range(configuration.signs))  # [0,1,2]\n    last_action     = history[\'action\'][-1]\n    opponent_action = observation.lastOpponentAction if observation.step > 0 else 2\n    \n    history[\'opponent\'].append(opponent_action)\n\n    # Make weighted random guess based on the complete move history, weighted towards relative moves based on our last action \n    move_frequency       = Counter(history[\'opponent\'])\n    response_frequency   = Counter(zip(history[\'action\'], history[\'opponent\'])) \n    move_weights         = [ move_frequency.get(n,1) + response_frequency.get((last_action,n),1) for n in range(configuration.signs) ] \n    guess                = random.choices( population=actions, weights=move_weights, k=1 )[0]\n    \n    # Compare our guess to how our opponent actually played\n    guess_frequency      = Counter(zip(history[\'guess\'], history[\'opponent\']))\n    guess_weights        = [ guess_frequency.get((guess,n),1) for n in range(configuration.signs) ]\n    prediction           = random.choices( population=actions, weights=guess_weights, k=1 )[0]\n\n    # Repeat, but based on how many times our prediction was correct\n    prediction_frequency = Counter(zip(history[\'prediction\'], history[\'opponent\']))\n    prediction_weights   = [ prediction_frequency.get((prediction,n),1) for n in range(configuration.signs) ]\n    expected             = random.choices( population=actions, weights=prediction_weights, k=1 )[0]\n\n    # Play the +1 counter move\n    action = (expected + 1) % configuration.signs\n    \n    # Persist state\n    history[\'guess\'].append(guess)\n    history[\'prediction\'].append(prediction)\n    history[\'expected\'].append(expected)\n    history[\'action\'].append(action)\n    \n    return action\n')
     __stickytape_write_module('stotransition.py', 'import numpy as np\nimport json\n#import torch\n\nmatrix = np.ones((3,3,3)) * (1/3) #so we can choose object based on what we chose and what the opponent chose transition matrix\nmatrix_freq = np.ones((3,3,3)) #frequency matrix\nprev_me = 0\nprev_op = 0\n#print(state_dict)\n\ndef copy_opponent_agent (observation, configuration):\n    \n    global prev_me, prev_op, matrix, matrix_freq\n        \n    if observation.step > 0:\n        #return (observation.lastOpponentAction + 1)%3\n        #prev_op = observation.lastOpponentAction #we store the last action of the opponent\n        \n        #from step > 1 we can update matrix because we know what we chose and what it chose\n        if observation.step > 1:\n            matrix_freq[prev_op, prev_me, observation.lastOpponentAction] += 1\n            matrix[prev_op, prev_me, :] = matrix_freq[prev_op, prev_me, :] / np.sum(matrix_freq[prev_op, prev_me, :]) \n            \n        \n        prev_op = observation.lastOpponentAction #we store the last action of the opponent  \n        \n        #choose the optimal choice based on the transition matrix\n        #choosing stochastically\n        prev_me = (np.random.choice(3, p=matrix[prev_op, prev_me, :]) + 1) % 3\n        \n        #print(matrix) \n        \n        state_dict = {"transition tensor" : matrix.tolist()}\n        with open(\'transition_matrix.json\', \'a\') as outfile:\n            json.dump(state_dict, outfile)\n            outfile.write("\\n")\n        \n        return prev_me\n        \n              \n    else:\n        #prev_me = np.random.randint(0,3)\n        state_dict = {"transition tensor" : matrix.tolist()}\n        with open(\'transition_matrix.json\', \'w\') as outfile:\n            json.dump(state_dict, outfile)\n            outfile.write("\\n")\n        prev_me = (np.random.choice(3, p=matrix[prev_op, prev_me, :]) + 1)%3\n        return prev_me\n        #json.dump(matrix_freq, outfile)\n')
     import numpy as np
     # Import various methods.
@@ -66,77 +66,56 @@ with __stickytape_temporary_dir() as __stickytape_working_dir:
     import stotransition
     
     # Use Proportional Representation to find most favorable move.
-    def proportionalRepresentation(array_of_moves, array_of_won_rounds, array_of_lost_rounds, step):
-        def filterWinrates(moves, win_rounds, lose_rounds):
-            indexes = []
-            rewards = win_rounds - lose_rounds
-            for i in range(len(rewards)):
-                # If one move's winrate is below 25%, remove it from the calculation.
-                if rewards[i] < 0:
-                    indexes.append(i)
-            moves = np.delete(moves, indexes)
-            rewards = np.delete(rewards, indexes)
-            return moves, rewards
+    def proportionalRepresentation(array_of_moves, array_of_won_rounds, array_of_lost_rounds):
     
-        # Filter out the methods that has very low win rate.
-        array_of_moves, array_of_rewards = filterWinrates(array_of_moves,
-                                                          array_of_won_rounds,
-                                                          array_of_lost_rounds)
-    
-        # If no method has threshold winrate, return a random move.
-        if len(array_of_rewards) == 0:
-            return np.random.randint(3)
-    
-        move_dict = {0: np.array([]), 1: np.array([]), 2:np.array([])}
-        
-        for index, element in enumerate(array_of_moves):
-            move_dict[element] = np.append(move_dict[element], array_of_rewards[index])
-        for move in move_dict:
-            if len(move_dict[move]) == 0:
-                move_dict[move] = 0
-            else:
-                move_dict[move] = sum(move_dict[move]) / len(move_dict[move])
-    
+        best_prob = -1
         best_move = 0
-        best_rating = -1
-        for move in move_dict:
-            if move_dict[move] > best_rating:
-                best_move = move
-                best_rating = move_dict[move]
+    
+        for index, move in enumerate(array_of_moves):
+            prob = np.random.beta(array_of_won_rounds[index], array_of_lost_rounds[index])
+            if prob > best_prob:
+                best_prob = prob
+                best_move = move.item()
+    
         return best_move
     
     
-    def updateWonLostRounds(array_of_moves, opponent_move, array_won_rounds):
-        current_win_round = np.array([0] * len(array_of_moves))
-        current_lose_round = np.array([0] * len(array_of_moves))
+    def updateWonLostRounds(array_of_moves, opponent_move, array_won_rounds, array_lost_rounds):
+    
+        decay_won = (array_won_rounds - 1) / 1.1 + 1
+        decay_lost = (array_lost_rounds - 1) / 1.1 + 1
+    
         for index, move in enumerate(array_of_moves):
             if move == (opponent_move + 1) % 3:
-                current_win_round[index] = 1
-            if move == (opponent_move + 2) % 3:
-                current_lose_round[index] = 1
-        return current_win_round, current_lose_round
+                decay_won[index] += 3
+            elif move == (opponent_move + 2) % 3:
+                decay_lost[index] += 3
+            else:
+                decay_won[index] += 3 / 2
+                decay_lost[index] += 3 / 2
+        return decay_won, decay_lost
     
     
     main_step = 0
-    main_won_rounds = np.array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-    main_lost_rounds = np.array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
     main_method_steps = np.array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                                   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+    main_won_rounds = np.array([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 
+                                1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1])
+    main_lost_rounds = np.array([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 
+                                 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1])
     
     def main(observation, configuration):
         global main_step
-        global main_won_rounds
         global main_method_steps
+        global main_won_rounds
         global main_lost_rounds
         # If not first step, update # of won round first.
         if main_step > 0:
-            current_win_round, current_lose_round = updateWonLostRounds(main_method_steps, 
-                                                                        int(observation.lastOpponentAction), 
-                                                                        main_won_rounds)
-            main_won_rounds = main_won_rounds + current_win_round
-            main_lost_rounds = main_lost_rounds + current_lose_round
+            temp_win, temp_lost = updateWonLostRounds(main_method_steps, 
+                                                      int(observation.lastOpponentAction), 
+                                                      main_won_rounds, main_lost_rounds)
+            main_won_rounds = temp_win
+            main_lost_rounds = temp_lost
     
         # Compute moves generated by each method.
         step_random_forest = randomforest.random_forest_random(observation, configuration)
@@ -166,7 +145,7 @@ with __stickytape_temporary_dir() as __stickytape_working_dir:
         # If not first step, find current optimized step.
         if main_step > 0:
             selected_step = proportionalRepresentation(main_method_steps, main_won_rounds, 
-                                                       main_lost_rounds, main_step)
+                                                       main_lost_rounds)
             main_step += 1
             return selected_step
         # Otherwise, return random number.

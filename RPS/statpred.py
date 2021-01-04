@@ -43,13 +43,5 @@ def statistical_prediction_agent(observation, configuration):
     history['prediction'].append(prediction)
     history['expected'].append(expected)
     history['action'].append(action)
-
-    # Print debug information
-    print('opponent_action                = ', opponent_action)
-    print('move_weights,       guess      = ', move_weights, guess)
-    print('guess_weights,      prediction = ', guess_weights, prediction)
-    print('prediction_weights, expected   = ', prediction_weights, expected)
-    print('action                         = ', action)
-    print()
     
     return action
